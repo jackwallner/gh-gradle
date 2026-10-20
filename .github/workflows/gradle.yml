@@ -1,0 +1,86 @@
+name: gradle
+run-name: ${{ inputs.id }}
+
+# Runs Gradle tasks for the Android port (the android/ folder) of one of Jack's
+# public app repos on a GitHub-hosted Linux runner, so the MacBook Air and the
+# Intel fleet machines do not have to. Started by ~/bin/gh-gradle, which pushes
+# a snapshot of the working tree to refs/gh-gradle/<id> in the app repo and
+# downloads the `result` artifact. Everything here is public (logs and artifacts
+# of a public repo), so never pass secrets in the inputs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      id: { description: run id, required: true }
+      repo: { description: owner/name of the app repo, required: true }
+      sha: { description: commit to build, required: true }
+      project_dir: { description: folder with gradlew, default: android }
+      tasks:
+        description: "space-separated Gradle tasks and flags, e.g. testDebugUnitTest assembleDebug"
+        required: true
+      emulator:
+        description: "API level for an emulator the tasks run against (empty: none)"
+        default: ""
+      products:
+        description: "true: bring back the built APKs, AABs and AARs"
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  gradle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      REPO: ${{ inputs.repo }}
+      SHA: ${{ inputs.sha }}
+      PROJECT_DIR: ${{ inputs.project_dir }}
+      TASKS: ${{ inputs.tasks }}
+      EMULATOR: ${{ inputs.emulator }}
+      PRODUCTS: ${{ inputs.products }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: tool }
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          path: app
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: "17" }
+      # Basic caching is the MIT-licensed provider; its key hashes the app's
+      # Gradle files, so each app keeps its own dependency cache.
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          add-job-summary: never
+      - name: Gradle
+        if: inputs.emulator == ''
+        run: tool/run.sh gradle
+      - name: Enable KVM
+        if: inputs.emulator != ''
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Gradle on emulator
+        if: inputs.emulator != ''
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.emulator }}
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: ./tool/run.sh gradle
+      - name: Collect
+        if: always()
+        run: tool/run.sh collect
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: out
+          retention-days: 3
